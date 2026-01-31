@@ -1,35 +1,38 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import ChordTimeline from '$lib/components/ChordTimeline.svelte';
-	import ChordDisplay from '$lib/components/ChordDisplay.svelte';
 	import { getHandTracker } from '$lib/ml/handTracker';
 	import { getChordClassifier } from '$lib/ml/chordClassifier';
-	import { getAudioAnalyzer } from '$lib/ml/audioAnalyzer';
 	import {
 		getVideoChordAnalyzer,
 		formatTime,
 		type ChordSegment
 	} from '$lib/ml/videoAnalyzer';
 	import {
-		captureSystemAudio,
-		stopCapture,
 		isSystemAudioSupported,
 		type AudioCaptureResult
 	} from '$lib/ml/systemAudioCapture';
 	import '../../app.css';
 
 	// 狀態
-	type Mode = 'idle' | 'file' | 'capture-setup' | 'analyzing' | 'done';
-	type InputSource = 'file' | 'screen';
+	type Mode = 'idle' | 'youtube' | 'file' | 'ready' | 'analyzing' | 'done';
+	type InputSource = 'youtube' | 'file';
 
 	let mode: Mode = 'idle';
-	let inputSource: InputSource = 'screen';
+	let inputSource: InputSource = 'youtube';
+
+	// YouTube
+	let youtubeUrl = '';
+	let youtubeId: string | null = null;
+
+	// 本地檔案
 	let selectedFile: File | null = null;
+	let videoUrl: string | null = null;
 
 	// 影片元素
 	let videoElement: HTMLVideoElement | null = null;
 	let canvasElement: HTMLCanvasElement | null = null;
-	let videoUrl: string | null = null;
+	let capturedVideoElement: HTMLVideoElement | null = null;
 
 	// 螢幕捕獲
 	let screenStream: MediaStream | null = null;
@@ -64,7 +67,6 @@
 	// ML 模組
 	const handTracker = getHandTracker();
 	const chordClassifier = getChordClassifier();
-	const audioAnalyzer = getAudioAnalyzer();
 	const videoAnalyzer = getVideoChordAnalyzer();
 
 	onMount(() => {
@@ -83,50 +85,79 @@
 		}
 	}
 
+	// 提取 YouTube ID
+	function extractYouTubeId(url: string): string | null {
+		const patterns = [
+			/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
+			/youtube\.com\/shorts\/([^&\n?#]+)/
+		];
+
+		for (const pattern of patterns) {
+			const match = url.match(pattern);
+			if (match) return match[1];
+		}
+		return null;
+	}
+
+	// 處理 YouTube URL 輸入
+	function handleYouTubeSubmit() {
+		errorMessage = '';
+		const id = extractYouTubeId(youtubeUrl);
+
+		if (!id) {
+			errorMessage = '無效的 YouTube 連結';
+			return;
+		}
+
+		youtubeId = id;
+		inputSource = 'youtube';
+		mode = 'youtube';
+	}
+
 	// 處理文件選擇
 	function handleFileSelect(event: Event) {
 		const input = event.target as HTMLInputElement;
 		if (input.files && input.files[0]) {
 			selectedFile = input.files[0];
+			inputSource = 'file';
 			mode = 'file';
 			errorMessage = '';
-
-			// 創建影片 URL
 			videoUrl = URL.createObjectURL(selectedFile);
 		}
 	}
 
-	// 開始螢幕捕獲
-	async function startScreenCapture() {
+	// 開始分析（YouTube 模式 - 需要螢幕捕獲）
+	async function startYouTubeAnalysis() {
 		errorMessage = '';
 
 		try {
-			// 請求螢幕分享（包含音頻）
+			// 請求螢幕分享（捕獲當前標籤頁）
 			screenStream = await navigator.mediaDevices.getDisplayMedia({
 				video: {
-					cursor: 'never',
-					displaySurface: 'window'
+					displaySurface: 'browser'
 				},
 				audio: {
 					echoCancellation: false,
 					noiseSuppression: false,
 					autoGainControl: false
-				}
+				},
+				// @ts-ignore - preferCurrentTab is a newer API
+				preferCurrentTab: true
 			});
 
 			// 檢查音頻軌道
 			const audioTracks = screenStream.getAudioTracks();
 			if (audioTracks.length === 0) {
-				errorMessage = '未選擇音頻分享。請重新選擇並勾選「分享音訊」選項。';
+				errorMessage = '請勾選「分享標籤頁音訊」選項，才能分析音頻和弦。';
 				screenStream.getTracks().forEach((t) => t.stop());
 				screenStream = null;
 				return;
 			}
 
-			// 設置影片源
-			if (videoElement) {
-				videoElement.srcObject = screenStream;
-				await videoElement.play();
+			// 設置捕獲的影片元素
+			if (capturedVideoElement) {
+				capturedVideoElement.srcObject = screenStream;
+				await capturedVideoElement.play();
 			}
 
 			// 設置音頻分析
@@ -150,7 +181,7 @@
 			};
 
 			// 開始分析
-			startAnalysis();
+			await startAnalysis();
 		} catch (error) {
 			console.error('螢幕捕獲錯誤:', error);
 			errorMessage = (error as Error).message;
@@ -162,16 +193,13 @@
 		if (!videoElement || !videoUrl) return;
 
 		try {
-			// 初始化音頻分析器（使用麥克風模式分析影片音頻）
-			await audioAnalyzer.initialize();
-
 			// 創建影片的音頻源
 			const audioContext = new AudioContext({ sampleRate: 44100 });
 			const source = audioContext.createMediaElementSource(videoElement);
 			const analyser = audioContext.createAnalyser();
 			analyser.fftSize = 4096;
 
-			// 連接到揚聲器（讓用戶能聽到）
+			// 連接到揚聲器
 			const gainNode = audioContext.createGain();
 			source.connect(analyser);
 			source.connect(gainNode);
@@ -184,8 +212,9 @@
 				source
 			};
 
+			capturedVideoElement = videoElement;
 			videoElement.play();
-			startAnalysis();
+			await startAnalysis();
 		} catch (error) {
 			console.error('分析錯誤:', error);
 			errorMessage = (error as Error).message;
@@ -208,82 +237,91 @@
 
 	// 分析單幀
 	async function analyzeFrame() {
-		if (!isAnalyzing || !videoElement || !canvasElement) return;
+		if (!isAnalyzing || !capturedVideoElement || !canvasElement) return;
 
 		const ctx = canvasElement.getContext('2d');
 		if (!ctx) return;
 
 		// 更新時間
-		if (inputSource === 'file' && videoElement.currentTime) {
-			currentTime = videoElement.currentTime;
+		if (inputSource === 'file' && capturedVideoElement.currentTime) {
+			currentTime = capturedVideoElement.currentTime;
 		} else {
 			currentTime = (Date.now() - analysisStartTime) / 1000;
 		}
 
-		// 繪製影片幀到 canvas
-		canvasElement.width = videoElement.videoWidth || 640;
-		canvasElement.height = videoElement.videoHeight || 480;
-		ctx.drawImage(videoElement, 0, 0);
+		// 確保影片有有效尺寸
+		const videoWidth = capturedVideoElement.videoWidth || 640;
+		const videoHeight = capturedVideoElement.videoHeight || 480;
 
-		// 視覺分析：MediaPipe 手部追蹤
-		let visionResult = { chord: '', confidence: 0 };
-		try {
-			const imageData = ctx.getImageData(0, 0, canvasElement.width, canvasElement.height);
-			const landmarks = await handTracker.detectHands(imageData);
+		if (videoWidth > 0 && videoHeight > 0) {
+			// 繪製影片幀到 canvas
+			canvasElement.width = videoWidth;
+			canvasElement.height = videoHeight;
+			ctx.drawImage(capturedVideoElement, 0, 0);
 
-			if (landmarks && landmarks.length > 0) {
-				handDetected = true;
-				visionResult = await chordClassifier.classifyChord(landmarks);
-				visionChord = visionResult.chord;
-			} else {
-				handDetected = false;
-				visionChord = '';
-			}
-		} catch (e) {
-			console.error('視覺分析錯誤:', e);
-		}
-
-		// 音頻分析
-		let audioResult = { chord: '', confidence: 0 };
-		if (audioCapture?.analyser) {
+			// 視覺分析：MediaPipe 手部追蹤
+			let visionResult = { chord: '', confidence: 0 };
 			try {
-				audioResult = analyzeAudioFrame(audioCapture.analyser, audioCapture.audioContext.sampleRate);
-				audioChord = audioResult.chord;
-			} catch (e) {
-				console.error('音頻分析錯誤:', e);
-			}
-		}
+				const imageData = ctx.getImageData(0, 0, canvasElement.width, canvasElement.height);
+				const landmarks = await handTracker.detectHands(imageData);
 
-		// 融合結果（視覺優先，如果有手部檢測）
-		if (handDetected && visionResult.confidence > 0.5) {
-			currentChord = visionResult.chord;
-			confidence = visionResult.confidence;
-		} else if (audioResult.confidence > 0.3) {
-			currentChord = audioResult.chord;
-			confidence = audioResult.confidence;
-		} else {
-			currentChord = '';
-			confidence = 0;
-		}
-
-		// 記錄和弦變化
-		if (currentChord) {
-			const lastSegment = recordedSegments[recordedSegments.length - 1];
-			if (!lastSegment || lastSegment.chord !== currentChord) {
-				if (lastSegment) {
-					lastSegment.endTime = currentTime;
+				if (landmarks && landmarks.length > 0) {
+					handDetected = true;
+					visionResult = await chordClassifier.classifyChord(landmarks);
+					visionChord = visionResult.chord;
+				} else {
+					handDetected = false;
+					visionChord = '';
 				}
-				recordedSegments.push({
-					chord: currentChord,
-					startTime: currentTime,
-					endTime: currentTime,
-					confidence
-				});
+			} catch (e) {
+				// 忽略視覺分析錯誤
+			}
+
+			// 音頻分析
+			let audioResult = { chord: '', confidence: 0 };
+			if (audioCapture?.analyser) {
+				try {
+					audioResult = analyzeAudioFrame(
+						audioCapture.analyser,
+						audioCapture.audioContext.sampleRate
+					);
+					audioChord = audioResult.chord;
+				} catch (e) {
+					// 忽略音頻分析錯誤
+				}
+			}
+
+			// 融合結果（視覺優先）
+			if (handDetected && visionResult.confidence > 0.5) {
+				currentChord = visionResult.chord;
+				confidence = visionResult.confidence;
+			} else if (audioResult.confidence > 0.3) {
+				currentChord = audioResult.chord;
+				confidence = audioResult.confidence;
+			} else {
+				currentChord = '';
+				confidence = 0;
+			}
+
+			// 記錄和弦變化
+			if (currentChord) {
+				const lastSegment = recordedSegments[recordedSegments.length - 1];
+				if (!lastSegment || lastSegment.chord !== currentChord) {
+					if (lastSegment) {
+						lastSegment.endTime = currentTime;
+					}
+					recordedSegments.push({
+						chord: currentChord,
+						startTime: currentTime,
+						endTime: currentTime,
+						confidence
+					});
+				}
 			}
 		}
 
 		// 檢查影片是否結束（本地檔案模式）
-		if (inputSource === 'file' && videoElement.ended) {
+		if (inputSource === 'file' && capturedVideoElement.ended) {
 			stopAnalysis();
 			return;
 		}
@@ -316,7 +354,6 @@
 		const dataArray = new Float32Array(bufferLength);
 		analyser.getFloatFrequencyData(dataArray);
 
-		// 計算 Chromagram
 		const chromagram = new Array(12).fill(0);
 		const binSize = sampleRate / (bufferLength * 2);
 
@@ -338,7 +375,6 @@
 		const maxEnergy = Math.max(...chromagram, 0.001);
 		const normalizedChromagram = chromagram.map((e) => e / maxEnergy);
 
-		// 識別和弦
 		let bestChord = '';
 		let bestScore = -Infinity;
 
@@ -378,37 +414,25 @@
 			animationFrameId = null;
 		}
 
-		// 停止螢幕捕獲
 		if (screenStream) {
 			screenStream.getTracks().forEach((t) => t.stop());
 			screenStream = null;
 		}
 
-		// 停止音頻捕獲
 		if (audioCapture) {
-			if (inputSource === 'screen') {
-				stopCapture(audioCapture);
-			} else {
-				audioCapture.audioContext.close();
-			}
+			audioCapture.audioContext.close();
 			audioCapture = null;
 		}
 
-		// 暫停影片
-		if (videoElement) {
-			videoElement.pause();
-			if (inputSource === 'screen') {
-				videoElement.srcObject = null;
-			}
+		if (capturedVideoElement && inputSource === 'youtube') {
+			capturedVideoElement.srcObject = null;
 		}
 
-		// 完成最後一個段落
 		const lastSegment = recordedSegments[recordedSegments.length - 1];
 		if (lastSegment) {
 			lastSegment.endTime = currentTime;
 		}
 
-		// 合併並過濾段落
 		segments = mergeSegments(recordedSegments);
 		duration = currentTime;
 		mode = 'done';
@@ -441,7 +465,7 @@
 
 	// 導出和弦譜
 	function exportChords() {
-		const source = selectedFile?.name || '螢幕捕獲';
+		const source = selectedFile?.name || `YouTube: ${youtubeId}`;
 		let text = `# 和弦分析結果\n\n`;
 		text += `**來源**: ${source}\n`;
 		text += `**長度**: ${formatTime(duration)}\n\n`;
@@ -461,14 +485,6 @@
 		URL.revokeObjectURL(url);
 	}
 
-	// 跳轉到指定時間
-	function seekTo(time: number) {
-		if (videoElement && inputSource === 'file') {
-			videoElement.currentTime = time;
-		}
-		currentTime = time;
-	}
-
 	// 重置
 	function reset() {
 		cleanup();
@@ -476,6 +492,8 @@
 		segments = [];
 		recordedSegments = [];
 		selectedFile = null;
+		youtubeUrl = '';
+		youtubeId = null;
 		errorMessage = '';
 		currentChord = '';
 		visionChord = '';
@@ -491,7 +509,7 @@
 	<!-- 標題 -->
 	<header class="text-center mb-8">
 		<h1 class="text-3xl md:text-4xl font-bold mb-2">🎬 影片和弦分析</h1>
-		<p class="text-gray-400">分析影片中的吉他和弦（視覺 + 音頻雙模態）</p>
+		<p class="text-gray-400">貼上 YouTube 連結或上傳影片，分析吉他和弦</p>
 		<a href="/" class="text-blue-400 hover:text-blue-300 text-sm mt-2 inline-block">
 			← 返回即時模式
 		</a>
@@ -501,34 +519,26 @@
 		{#if mode === 'idle'}
 			<!-- 選擇輸入方式 -->
 			<div class="grid md:grid-cols-2 gap-6">
-				<!-- 螢幕捕獲（YouTube 等） -->
+				<!-- YouTube 連結 -->
 				<div class="chord-card">
 					<h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
-						<span class="text-red-500">▶</span> 螢幕捕獲
+						<span class="text-red-500">▶</span> YouTube 影片
 					</h2>
-					<p class="text-gray-400 text-sm mb-4">
-						捕獲螢幕畫面和音頻，分析 YouTube 或其他影片中的吉他和弦
-					</p>
+					<p class="text-gray-400 text-sm mb-4">貼上 YouTube 影片連結，分析其中的吉他和弦</p>
 
-					<div class="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-4 text-sm">
-						<div class="font-medium text-yellow-400 mb-1">使用說明</div>
-						<ol class="text-gray-400 space-y-1 list-decimal list-inside">
-							<li>開啟 YouTube 或其他影片</li>
-							<li>點擊下方按鈕開始捕獲</li>
-							<li>選擇影片所在的視窗</li>
-							<li>勾選「分享音訊」選項</li>
-						</ol>
-					</div>
+					<input
+						type="text"
+						bind:value={youtubeUrl}
+						placeholder="https://www.youtube.com/watch?v=..."
+						class="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-red-500"
+					/>
 
 					<button
-						onclick={() => {
-							inputSource = 'screen';
-							mode = 'capture-setup';
-						}}
-						disabled={!supportsScreenCapture}
-						class="w-full py-2 bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
+						onclick={handleYouTubeSubmit}
+						disabled={!youtubeUrl}
+						class="mt-4 w-full py-2 bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
 					>
-						🖥️ 開始螢幕捕獲
+						載入影片
 					</button>
 				</div>
 
@@ -537,11 +547,9 @@
 					<h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
 						<span class="text-green-500">🎵</span> 本地影片
 					</h2>
-					<p class="text-gray-400 text-sm mb-4">
-						上傳本地影片檔案，分析其中的吉他和弦
-					</p>
+					<p class="text-gray-400 text-sm mb-4">上傳本地影片檔案，分析其中的吉他和弦</p>
 					<label class="block">
-						<div class="w-full py-8 border-2 border-dashed border-white/20 rounded-lg text-center cursor-pointer hover:border-blue-500 transition-colors">
+						<div class="w-full py-8 border-2 border-dashed border-white/20 rounded-lg text-center cursor-pointer hover:border-green-500 transition-colors">
 							<div class="text-4xl mb-2">📁</div>
 							<div class="text-gray-400">點擊選擇影片</div>
 							<div class="text-gray-500 text-xs mt-1">支援 MP4, WebM, MOV</div>
@@ -549,10 +557,7 @@
 						<input
 							type="file"
 							accept="video/*"
-							onchange={(e) => {
-								handleFileSelect(e);
-								inputSource = 'file';
-							}}
+							onchange={handleFileSelect}
 							class="hidden"
 						/>
 					</label>
@@ -565,15 +570,29 @@
 				</div>
 			{/if}
 
-		{:else if mode === 'capture-setup'}
-			<!-- 螢幕捕獲設置 -->
-			<div class="chord-card text-center py-8">
-				<div class="text-6xl mb-4">🖥️</div>
-				<h2 class="text-xl font-semibold mb-2">準備螢幕捕獲</h2>
-				<p class="text-gray-400 mb-6 max-w-md mx-auto">
-					點擊開始後，請選擇包含影片的視窗，<br />
-					<strong class="text-yellow-400">並勾選「分享音訊」選項</strong>
-				</p>
+		{:else if mode === 'youtube'}
+			<!-- YouTube 影片預覽 -->
+			<div class="chord-card">
+				<div class="aspect-video mb-4 rounded-lg overflow-hidden bg-black">
+					<iframe
+						src="https://www.youtube.com/embed/{youtubeId}?enablejsapi=1"
+						title="YouTube video"
+						class="w-full h-full"
+						allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+						allowfullscreen
+					></iframe>
+				</div>
+
+				<div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
+					<h3 class="font-medium text-blue-400 mb-2">📋 分析步驟</h3>
+					<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
+						<li>點擊下方「開始分析」按鈕</li>
+						<li>在彈出視窗中選擇「Chrome 標籤頁」</li>
+						<li>選擇此標籤頁，並<strong class="text-yellow-400">勾選「分享標籤頁音訊」</strong></li>
+						<li>回到此頁面，播放上方 YouTube 影片</li>
+						<li>系統會同時分析畫面和音頻中的和弦</li>
+					</ol>
+				</div>
 
 				{#if errorMessage}
 					<div class="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-300 text-sm">
@@ -581,12 +600,12 @@
 					</div>
 				{/if}
 
-				<div class="flex gap-4 justify-center">
+				<div class="flex gap-4">
 					<button
-						onclick={startScreenCapture}
-						class="px-8 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium transition-colors"
+						onclick={startYouTubeAnalysis}
+						class="flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium transition-colors"
 					>
-						▶ 開始捕獲
+						🔍 開始分析
 					</button>
 					<button
 						onclick={reset}
@@ -610,7 +629,6 @@
 					</div>
 				</div>
 
-				<!-- 預覽 -->
 				<video
 					bind:this={videoElement}
 					src={videoUrl}
@@ -651,17 +669,16 @@
 						</button>
 					</div>
 
-					<!-- 影片畫面 -->
-					<div class="relative">
+					<!-- 捕獲的畫面 -->
+					<div class="relative aspect-video bg-black rounded-lg overflow-hidden">
 						<video
-							bind:this={videoElement}
-							class="w-full rounded-lg"
-							muted={inputSource === 'screen'}
+							bind:this={capturedVideoElement}
+							class="w-full h-full object-contain"
+							muted
 							playsinline
 						>
 							<track kind="captions" />
 						</video>
-						<!-- 隱藏的 Canvas 用於幀提取 -->
 						<canvas bind:this={canvasElement} class="hidden"></canvas>
 					</div>
 
@@ -678,6 +695,12 @@
 							<span class="text-purple-400">音頻: {audioChord}</span>
 						{/if}
 					</div>
+
+					{#if inputSource === 'youtube'}
+						<p class="mt-4 text-center text-yellow-400 text-sm">
+							⬆️ 請在上方 YouTube 影片中點擊播放
+						</p>
+					{/if}
 				</div>
 
 				<!-- 和弦顯示 -->
@@ -692,7 +715,6 @@
 						</div>
 					{/if}
 
-					<!-- 已識別和弦 -->
 					{#if recordedSegments.length > 0}
 						<div class="mt-6 w-full">
 							<h3 class="text-sm font-medium text-gray-400 mb-2">和弦序列</h3>
@@ -711,25 +733,8 @@
 		{:else if mode === 'done'}
 			<!-- 分析結果 -->
 			<div class="space-y-6">
-				<!-- 影片播放器（僅本地檔案） -->
-				{#if inputSource === 'file' && videoUrl}
-					<div class="chord-card">
-						<video
-							bind:this={videoElement}
-							src={videoUrl}
-							controls
-							ontimeupdate={() => {
-								if (videoElement) currentTime = videoElement.currentTime;
-							}}
-							class="w-full rounded-lg"
-						>
-							<track kind="captions" />
-						</video>
-					</div>
-				{/if}
-
 				<!-- 時間軸 -->
-				<ChordTimeline {segments} {duration} {currentTime} onSeek={seekTo} />
+				<ChordTimeline {segments} {duration} {currentTime} onSeek={() => {}} />
 
 				<!-- 操作按鈕 -->
 				<div class="flex gap-4">
