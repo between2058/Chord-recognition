@@ -1,0 +1,89 @@
+@import 'tailwindcss';
+
+:root {
+	--color-primary: #3b82f6;
+	--color-secondary: #8b5cf6;
+	--color-success: #22c55e;
+	--color-warning: #f59e0b;
+	--color-error: #ef4444;
+}
+
+body {
+	font-family: 'Inter', system-ui, -apple-system, sans-serif;
+	background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+	min-height: 100vh;
+	color: white;
+}
+
+/* Video container styling */
+.video-container {
+	position: relative;
+	border-radius: 1rem;
+	overflow: hidden;
+	box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.video-overlay {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
+
+/* Chord display card */
+.chord-card {
+	background: rgba(255, 255, 255, 0.1);
+	backdrop-filter: blur(10px);
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	border-radius: 1rem;
+	padding: 1.5rem;
+}
+
+/* Confidence meter */
+.confidence-bar {
+	height: 8px;
+	border-radius: 4px;
+	background: rgba(255, 255, 255, 0.2);
+	overflow: hidden;
+}
+
+.confidence-fill {
+	height: 100%;
+	border-radius: 4px;
+	transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+/* Audio visualizer */
+.audio-bar {
+	background: linear-gradient(to top, var(--color-primary), var(--color-secondary));
+	border-radius: 2px;
+	transition: height 0.05s ease;
+}
+
+/* Animations */
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.5; }
+}
+
+.animate-pulse-slow {
+	animation: pulse 2s ease-in-out infinite;
+}
+
+/* Status indicators */
+.status-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+}
+
+.status-active {
+	background-color: var(--color-success);
+	box-shadow: 0 0 10px var(--color-success);
+}
+
+.status-inactive {
+	background-color: var(--color-error);
+}
