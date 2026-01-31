@@ -8,15 +8,26 @@
 		type ChordSegment,
 		type AnalysisProgress
 	} from '$lib/ml/videoAnalyzer';
+	import {
+		extractYouTubeAudio,
+		downloadAudioAsArrayBuffer,
+		getVideoInfo,
+		extractVideoId,
+		getThumbnailUrl
+	} from '$lib/ml/youtubeExtractor';
 	import '../../app.css';
 
 	// 狀態
-	let mode: 'idle' | 'youtube' | 'file' | 'analyzing' | 'done' = 'idle';
+	type Mode = 'idle' | 'youtube-loading' | 'youtube-ready' | 'file' | 'analyzing' | 'done';
+	let mode: Mode = 'idle';
 	let youtubeUrl = '';
-	let youtubeId = '';
 	let selectedFile: File | null = null;
 	let audioElement: HTMLAudioElement | null = null;
-	let youtubePlayer: YT.Player | null = null;
+	let audioUrl: string | null = null;
+
+	// YouTube 資訊
+	let videoInfo: { title: string; author: string; thumbnail: string } | null = null;
+	let videoId: string | null = null;
 
 	// 分析結果
 	let segments: ChordSegment[] = [];
@@ -24,6 +35,7 @@
 	let currentTime = 0;
 	let progress = 0;
 	let currentChord = '';
+	let statusMessage = '';
 
 	// 錯誤訊息
 	let errorMessage = '';
@@ -31,79 +43,99 @@
 	const analyzer = getVideoChordAnalyzer();
 
 	onMount(() => {
-		// 載入 YouTube IFrame API
-		if (!window.YT) {
-			const tag = document.createElement('script');
-			tag.src = 'https://www.youtube.com/iframe_api';
-			const firstScriptTag = document.getElementsByTagName('script')[0];
-			firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
-		}
-
 		return () => {
 			analyzer.dispose();
+			if (audioUrl) {
+				URL.revokeObjectURL(audioUrl);
+			}
 		};
 	});
 
 	// 處理 YouTube URL 輸入
-	function handleYouTubeSubmit() {
+	async function handleYouTubeSubmit() {
 		errorMessage = '';
-		const id = extractYouTubeId(youtubeUrl);
+		statusMessage = '';
 
+		const id = extractVideoId(youtubeUrl);
 		if (!id) {
 			errorMessage = '無效的 YouTube 連結';
 			return;
 		}
 
-		youtubeId = id;
-		mode = 'youtube';
+		videoId = id;
+		mode = 'youtube-loading';
+		statusMessage = '正在獲取影片資訊...';
 
-		// 初始化 YouTube 播放器
-		setTimeout(() => {
-			initYouTubePlayer();
-		}, 100);
-	}
+		try {
+			// 獲取影片資訊
+			videoInfo = await getVideoInfo(youtubeUrl);
+			statusMessage = '正在提取音頻連結...';
 
-	// 初始化 YouTube 播放器
-	function initYouTubePlayer() {
-		if (!window.YT || !window.YT.Player) {
-			// API 尚未載入，等待
-			window.onYouTubeIframeAPIReady = () => {
-				createPlayer();
-			};
-		} else {
-			createPlayer();
+			// 提取音頻
+			const result = await extractYouTubeAudio(youtubeUrl, (msg) => {
+				statusMessage = msg;
+			});
+
+			if (!result.success || !result.audioUrl) {
+				throw new Error(result.error || '無法提取音頻');
+			}
+
+			statusMessage = '正在下載音頻...';
+
+			// 下載音頻
+			const audioBuffer = await downloadAudioAsArrayBuffer(result.audioUrl, (pct) => {
+				progress = pct;
+				statusMessage = `下載中... ${pct.toFixed(0)}%`;
+			});
+
+			// 創建 Blob 和 URL
+			const blob = new Blob([audioBuffer], { type: 'audio/mpeg' });
+			audioUrl = URL.createObjectURL(blob);
+
+			mode = 'youtube-ready';
+			statusMessage = '';
+			progress = 0;
+		} catch (error) {
+			console.error('YouTube 處理錯誤:', error);
+			errorMessage = `無法處理 YouTube 影片: ${(error as Error).message}`;
+			mode = 'idle';
 		}
 	}
 
-	function createPlayer() {
-		youtubePlayer = new window.YT.Player('youtube-player', {
-			height: '360',
-			width: '640',
-			videoId: youtubeId,
-			playerVars: {
-				autoplay: 0,
-				controls: 1,
-				modestbranding: 1
-			},
-			events: {
-				onReady: onPlayerReady,
-				onStateChange: onPlayerStateChange
-			}
-		});
-	}
+	// 開始分析 YouTube 音頻
+	async function analyzeYouTube() {
+		if (!audioUrl) return;
 
-	function onPlayerReady(event: YT.PlayerEvent) {
-		duration = event.target.getDuration();
-		// 開始追蹤播放位置
-		setInterval(() => {
-			if (youtubePlayer && mode === 'youtube') {
-				currentTime = youtubePlayer.getCurrentTime() || 0;
-			}
-		}, 100);
-	}
+		mode = 'analyzing';
+		segments = [];
+		progress = 0;
 
-	function onPlayerStateChange(event: YT.OnStateChangeEvent) {
-		// 可以在這裡處理播放狀態變化
+		try {
+			// 獲取音頻數據
+			const response = await fetch(audioUrl);
+			const arrayBuffer = await response.arrayBuffer();
+
+			// 使用 analyzeArrayBuffer 分析
+			const result = await analyzer.analyzeArrayBuffer(arrayBuffer, (p: AnalysisProgress) => {
+				progress = p.percentage;
+				currentChord = p.currentChord;
+				currentTime = p.currentTime;
+				duration = p.duration;
+			});
+
+			segments = result.segments;
+			duration = result.duration;
+			mode = 'done';
+
+			// 設置音頻元素
+			if (audioElement) {
+				audioElement.src = audioUrl;
+			}
+		} catch (error) {
+			console.error('分析錯誤:', error);
+			errorMessage = '分析失敗: ' + (error as Error).message;
+			mode = 'youtube-ready';
+		}
 	}
 
 	// 處理文件選擇
@@ -137,9 +169,9 @@
 			mode = 'done';
 
 			// 創建音頻元素用於播放
-			const url = URL.createObjectURL(selectedFile);
+			audioUrl = URL.createObjectURL(selectedFile);
 			if (audioElement) {
-				audioElement.src = url;
+				audioElement.src = audioUrl;
 			}
 		} catch (error) {
 			console.error('分析錯誤:', error);
@@ -153,9 +185,6 @@
 		if (audioElement) {
 			audioElement.currentTime = time;
 		}
-		if (youtubePlayer) {
-			youtubePlayer.seekTo(time, true);
-		}
 		currentTime = time;
 	}
 
@@ -168,7 +197,9 @@
 
 	// 導出和弦譜
 	function exportChords() {
-		let text = '# 和弦分析結果\n\n';
+		const title = videoInfo?.title || selectedFile?.name || '未知';
+		let text = `# 和弦分析結果\n\n`;
+		text += `**來源**: ${title}\n\n`;
 		text += '| 時間 | 和弦 | 長度 |\n';
 		text += '|------|------|------|\n';
 
@@ -183,6 +214,21 @@
 		a.download = 'chord-analysis.md';
 		a.click();
 		URL.revokeObjectURL(url);
+	}
+
+	// 重置
+	function reset() {
+		mode = 'idle';
+		segments = [];
+		selectedFile = null;
+		videoInfo = null;
+		videoId = null;
+		youtubeUrl = '';
+		errorMessage = '';
+		if (audioUrl) {
+			URL.revokeObjectURL(audioUrl);
+			audioUrl = null;
+		}
 	}
 </script>
 
@@ -214,7 +260,7 @@
 						<span class="text-red-500">▶</span> YouTube 影片
 					</h2>
 					<p class="text-gray-400 text-sm mb-4">
-						貼上 YouTube 連結，即時同步顯示和弦
+						貼上 YouTube 連結，自動提取音頻並分析和弦
 					</p>
 					<input
 						type="text"
@@ -226,7 +272,7 @@
 						onclick={handleYouTubeSubmit}
 						class="mt-4 w-full py-2 bg-red-600 hover:bg-red-500 rounded-lg font-medium transition-colors"
 					>
-						載入影片
+						🔍 分析 YouTube 影片
 					</button>
 				</div>
 
@@ -260,40 +306,64 @@
 				</div>
 			{/if}
 
-		{:else if mode === 'youtube'}
-			<!-- YouTube 播放器 -->
-			<div class="space-y-6">
-				<div class="chord-card">
-					<div class="aspect-video bg-black rounded-lg overflow-hidden flex items-center justify-center">
-						<div id="youtube-player"></div>
-					</div>
-				</div>
+		{:else if mode === 'youtube-loading'}
+			<!-- YouTube 載入中 -->
+			<div class="chord-card text-center py-12">
+				<div class="text-6xl mb-4 animate-pulse">📥</div>
+				<h2 class="text-xl font-semibold mb-2">處理 YouTube 影片</h2>
+				<p class="text-gray-400 mb-4">{statusMessage}</p>
 
-				{#if segments.length > 0}
-					<ChordTimeline
-						{segments}
-						{duration}
-						{currentTime}
-						onSeek={seekTo}
-					/>
-				{:else}
-					<div class="chord-card text-center py-8">
-						<p class="text-gray-400">
-							播放影片時將自動分析和弦...
-						</p>
-						<p class="text-gray-500 text-sm mt-2">
-							提示：由於瀏覽器限制，YouTube 影片無法直接提取音頻進行離線分析。
-							<br/>建議下載音頻後使用本地檔案分析功能。
-						</p>
+				{#if progress > 0}
+					<div class="w-full max-w-md mx-auto h-2 bg-gray-700 rounded-full overflow-hidden mb-2">
+						<div
+							class="h-full bg-gradient-to-r from-red-500 to-pink-500 transition-all duration-300"
+							style="width: {progress}%"
+						></div>
 					</div>
+					<div class="text-sm text-gray-400">{progress.toFixed(0)}%</div>
 				{/if}
 
 				<button
-					onclick={() => { mode = 'idle'; youtubeId = ''; }}
-					class="text-gray-400 hover:text-white transition-colors"
+					onclick={reset}
+					class="mt-6 text-gray-400 hover:text-white transition-colors"
 				>
-					← 返回選擇
+					取消
 				</button>
+			</div>
+
+		{:else if mode === 'youtube-ready'}
+			<!-- YouTube 準備就緒 -->
+			<div class="chord-card">
+				{#if videoInfo}
+					<div class="flex gap-4 mb-6">
+						{#if videoId}
+							<img
+								src={getThumbnailUrl(videoId)}
+								alt="縮圖"
+								class="w-32 h-20 object-cover rounded-lg"
+							/>
+						{/if}
+						<div class="flex-1">
+							<h3 class="font-medium text-lg">{videoInfo.title}</h3>
+							<p class="text-gray-400 text-sm">{videoInfo.author}</p>
+						</div>
+					</div>
+				{/if}
+
+				<div class="flex gap-4">
+					<button
+						onclick={analyzeYouTube}
+						class="flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium transition-colors"
+					>
+						🔍 開始分析和弦
+					</button>
+					<button
+						onclick={reset}
+						class="px-6 py-3 bg-gray-600 hover:bg-gray-500 rounded-lg font-medium transition-colors"
+					>
+						取消
+					</button>
+				</div>
 			</div>
 
 		{:else if mode === 'file'}
@@ -317,7 +387,7 @@
 				</button>
 
 				<button
-					onclick={() => { mode = 'idle'; selectedFile = null; }}
+					onclick={reset}
 					class="mt-4 text-gray-400 hover:text-white transition-colors"
 				>
 					← 返回選擇
@@ -348,6 +418,23 @@
 		{:else if mode === 'done'}
 			<!-- 分析結果 -->
 			<div class="space-y-6">
+				<!-- 來源資訊 -->
+				{#if videoInfo}
+					<div class="chord-card flex items-center gap-4">
+						{#if videoId}
+							<img
+								src={getThumbnailUrl(videoId)}
+								alt="縮圖"
+								class="w-24 h-16 object-cover rounded-lg"
+							/>
+						{/if}
+						<div>
+							<h3 class="font-medium">{videoInfo.title}</h3>
+							<p class="text-gray-400 text-sm">{videoInfo.author}</p>
+						</div>
+					</div>
+				{/if}
+
 				<!-- 音頻播放器 -->
 				<div class="chord-card">
 					<audio
@@ -377,7 +464,7 @@
 						📥 導出和弦譜
 					</button>
 					<button
-						onclick={() => { mode = 'idle'; segments = []; selectedFile = null; }}
+						onclick={reset}
 						class="flex-1 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg font-medium transition-colors"
 					>
 						🔄 分析其他檔案
@@ -413,6 +500,7 @@
 	<!-- 頁尾 -->
 	<footer class="text-center mt-12 text-gray-500 text-sm">
 		<p>使用 Chromagram 算法分析音頻和弦</p>
+		<p class="mt-1">YouTube 音頻提取使用 Cobalt API</p>
 	</footer>
 </div>
 

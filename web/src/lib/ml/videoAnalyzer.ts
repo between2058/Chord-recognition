@@ -74,9 +74,34 @@ export class VideoChordAnalyzer {
 	}
 
 	/**
+	 * 從 ArrayBuffer 分析音頻（用於 YouTube 音頻）
+	 */
+	async analyzeArrayBuffer(
+		arrayBuffer: ArrayBuffer,
+		onProgress?: ProgressCallback
+	): Promise<AnalysisResult> {
+		console.log('🎵 開始分析 ArrayBuffer...');
+
+		// 創建音頻上下文
+		if (!this.audioContext) {
+			this.audioContext = new AudioContext();
+		}
+
+		// 解碼音頻
+		const audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
+
+		console.log(`  時長: ${audioBuffer.duration.toFixed(2)}s`);
+		console.log(`  採樣率: ${audioBuffer.sampleRate}Hz`);
+		console.log(`  聲道數: ${audioBuffer.numberOfChannels}`);
+
+		// 分析音頻
+		return this.analyzeAudioBuffer(audioBuffer, onProgress);
+	}
+
+	/**
 	 * 分析 AudioBuffer
 	 */
-	private async analyzeAudioBuffer(
+	async analyzeAudioBuffer(
 		audioBuffer: AudioBuffer,
 		onProgress?: ProgressCallback
 	): Promise<AnalysisResult> {
