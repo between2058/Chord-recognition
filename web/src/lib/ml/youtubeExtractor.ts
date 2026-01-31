@@ -4,10 +4,12 @@
  */
 
 // Cobalt API 端點列表（如果一個失敗，嘗試下一個）
+// 注意：大多數公共實例現在需要 API 金鑰或 Turnstile 驗證
 const COBALT_INSTANCES = [
-	'https://api.cobalt.tools',
-	'https://cobalt-api.hyper.lol',
-	'https://cobalt.api.timelessnesses.me'
+	'https://cobalt.weasel.is',
+	'https://co.eepy.today',
+	'https://cobalt.canine.tools',
+	'https://api.cobalt.tools'
 ];
 
 export interface YouTubeAudioResult {
@@ -53,10 +55,11 @@ export async function extractYouTubeAudio(
 				},
 				body: JSON.stringify({
 					url: youtubeUrl,
+					downloadMode: 'audio',
 					audioFormat: 'mp3',
-					isAudioOnly: true,
-					aFormat: 'mp3',
-					filenameStyle: 'basic'
+					audioBitrate: '128',
+					filenameStyle: 'basic',
+					disableMetadata: false
 				})
 			});
 
