@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import ChordTimeline from '$lib/components/ChordTimeline.svelte';
 	import { getHandTracker } from '$lib/ml/handTracker';
 	import { getChordClassifier } from '$lib/ml/chordClassifier';
@@ -160,12 +160,6 @@
 				return;
 			}
 
-			// 設置捕獲的影片元素
-			if (capturedVideoElement) {
-				capturedVideoElement.srcObject = screenStream;
-				await capturedVideoElement.play();
-			}
-
 			// 設置音頻分析
 			const audioStream = new MediaStream(audioTracks);
 			const audioContext = new AudioContext({ sampleRate: 44100 });
@@ -186,7 +180,7 @@
 				stopAnalysis();
 			};
 
-			// 開始分析
+			// 開始分析（這會先切換模式，等待 DOM 更新，然後設置視頻元素）
 			await startAnalysis();
 		} catch (error) {
 			console.error('螢幕捕獲錯誤:', error);
@@ -202,12 +196,6 @@
 				video: true,
 				audio: false // Safari 不支援
 			});
-
-			// 設置捕獲的影片元素
-			if (capturedVideoElement) {
-				capturedVideoElement.srcObject = screenStream;
-				await capturedVideoElement.play();
-			}
 
 			// 2. 請求麥克風權限來收錄電腦播放的聲音
 			const micStream = await navigator.mediaDevices.getUserMedia({
@@ -239,7 +227,7 @@
 				stopAnalysis();
 			};
 
-			// 開始分析
+			// 開始分析（這會先切換模式，等待 DOM 更新，然後設置視頻元素）
 			await startAnalysis();
 		} catch (error) {
 			console.error('Safari 分析錯誤:', error);
@@ -285,21 +273,54 @@
 		// 初始化 ML 模組
 		await Promise.all([handTracker.initialize(), chordClassifier.initialize()]);
 
+		// 先切換到分析模式，讓視頻元素渲染出來
 		mode = 'analyzing';
 		isAnalyzing = true;
 		recordedSegments = [];
 		analysisStartTime = Date.now();
 		currentTime = 0;
 
+		// 等待 DOM 更新，確保 capturedVideoElement 已經渲染
+		await tick();
+
+		// 現在設置捕獲的影片元素（YouTube 模式）
+		if (inputSource === 'youtube' && screenStream && capturedVideoElement) {
+			capturedVideoElement.srcObject = screenStream;
+			try {
+				await capturedVideoElement.play();
+				console.log('✅ 視頻播放開始');
+			} catch (e) {
+				console.error('視頻播放失敗:', e);
+			}
+		}
+
+		// 確認元素已就緒
+		if (!capturedVideoElement) {
+			console.error('❌ capturedVideoElement 未就緒');
+			errorMessage = '視頻元素初始化失敗，請重試';
+			stopAnalysis();
+			return;
+		}
+
+		console.log('🎬 開始分析循環');
 		analyzeFrame();
 	}
 
 	// 分析單幀
 	async function analyzeFrame() {
-		if (!isAnalyzing || !capturedVideoElement || !canvasElement) return;
+		if (!isAnalyzing) return;
+
+		// 如果元素還沒準備好，繼續等待
+		if (!capturedVideoElement || !canvasElement) {
+			animationFrameId = requestAnimationFrame(analyzeFrame);
+			return;
+		}
 
 		const ctx = canvasElement.getContext('2d');
-		if (!ctx) return;
+		if (!ctx) {
+			animationFrameId = requestAnimationFrame(analyzeFrame);
+			return;
+		}
 
 		// 更新時間
 		if (inputSource === 'file' && capturedVideoElement.currentTime) {
@@ -308,9 +329,9 @@
 			currentTime = (Date.now() - analysisStartTime) / 1000;
 		}
 
-		// 確保影片有有效尺寸
-		const videoWidth = capturedVideoElement.videoWidth || 640;
-		const videoHeight = capturedVideoElement.videoHeight || 480;
+		// 確保影片有有效尺寸（視頻流可能需要一點時間載入）
+		const videoWidth = capturedVideoElement.videoWidth;
+		const videoHeight = capturedVideoElement.videoHeight;
 
 		if (videoWidth > 0 && videoHeight > 0) {
 			// 繪製影片幀到 canvas
