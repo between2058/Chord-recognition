@@ -34,37 +34,52 @@ export interface ClassificationResult {
 }
 
 export class ChordClassifier {
-	private models: Map<string, tf.GraphModel> = new Map();
+	private models: Map<string, tf.LayersModel> = new Map();
+	private labels: Map<string, string[]> = new Map();
 	private isInitialized = false;
-	private confidenceThreshold = 0.8;
+	private confidenceThreshold = 0.6; // 降低閾值以獲得更多結果
 
 	/**
-	 * 載入所有模型
-	 * 注意：需要先將 TFLite 模型轉換為 TensorFlow.js 格式
+	 * 載入所有模型（Keras LayersModel 格式）
 	 */
 	async initialize(modelBasePath = '/models'): Promise<void> {
 		console.log('🎸 正在載入和弦分類模型...');
 
 		try {
-			// 嘗試載入模型，如果模型不存在則使用 mock 模式
 			const modelNames = ['model1', 'model2', 'model3', 'model4'];
 
-			for (const name of modelNames) {
+			// 並行載入所有模型
+			const loadPromises = modelNames.map(async (name) => {
 				try {
-					const model = await tf.loadGraphModel(`${modelBasePath}/${name}/model.json`);
+					// 使用 loadLayersModel 載入 Keras 格式模型
+					const model = await tf.loadLayersModel(`${modelBasePath}/${name}/model.json`);
 					this.models.set(name, model);
-					console.log(`✅ ${name} 載入成功`);
-				} catch {
-					console.warn(`⚠️ ${name} 載入失敗，使用模擬模式`);
+
+					// 載入標籤
+					try {
+						const labelsResponse = await fetch(`${modelBasePath}/${name}/labels.json`);
+						const labelsData = await labelsResponse.json();
+						this.labels.set(name, labelsData);
+					} catch {
+						// 使用預設標籤
+						this.labels.set(name, CHORD_LABELS[name as keyof typeof CHORD_LABELS] as unknown as string[]);
+					}
+
+					console.log(`✅ ${name} 載入成功 (${model.inputs[0].shape})`);
+					return true;
+				} catch (err) {
+					console.warn(`⚠️ ${name} 載入失敗，使用模擬模式:`, err);
+					return false;
 				}
-			}
+			});
+
+			await Promise.all(loadPromises);
 
 			this.isInitialized = true;
-			console.log('✅ 和弦分類器初始化完成');
+			console.log(`✅ 和弦分類器初始化完成 (${this.models.size}/4 模型載入)`);
 		} catch (error) {
 			console.error('❌ 模型載入失敗:', error);
-			// 即使載入失敗，也標記為初始化完成（使用模擬模式）
-			this.isInitialized = true;
+			this.isInitialized = true; // 使用模擬模式
 		}
 	}
 
@@ -74,32 +89,51 @@ export class ChordClassifier {
 	private async runModel(
 		modelName: string,
 		input: number[]
-	): Promise<{ classId: number; confidence: number }> {
+	): Promise<{ classId: number; confidence: number; label: string }> {
 		const model = this.models.get(modelName);
+		const labels = this.labels.get(modelName) || CHORD_LABELS[modelName as keyof typeof CHORD_LABELS] || [];
 
 		if (!model) {
 			// 模擬模式：隨機返回結果
-			const numClasses =
-				CHORD_LABELS[modelName as keyof typeof CHORD_LABELS]?.length || 2;
+			const numClasses = labels.length || 2;
 			const classId = Math.floor(Math.random() * numClasses);
-			return { classId, confidence: 0.5 + Math.random() * 0.5 };
+			return {
+				classId,
+				confidence: 0.5 + Math.random() * 0.5,
+				label: labels[classId] || '未知'
+			};
 		}
 
-		const inputTensor = tf.tensor2d([input], [1, input.length]);
+		// 創建輸入張量 (batch_size=1, features=42)
+		const inputTensor = tf.tensor2d([input], [1, 42]);
 
 		try {
+			// 執行推理
 			const output = model.predict(inputTensor) as tf.Tensor;
 			const probabilities = await output.data();
-			const classId = probabilities.indexOf(Math.max(...probabilities));
-			const confidence = probabilities[classId];
+
+			// 找到最大概率的類別
+			let maxProb = -1;
+			let classId = 0;
+			for (let i = 0; i < probabilities.length; i++) {
+				if (probabilities[i] > maxProb) {
+					maxProb = probabilities[i];
+					classId = i;
+				}
+			}
 
 			// 清理張量
 			inputTensor.dispose();
 			output.dispose();
 
-			return { classId, confidence };
+			return {
+				classId,
+				confidence: maxProb,
+				label: labels[classId] || '未知'
+			};
 		} catch (error) {
 			inputTensor.dispose();
+			console.error(`模型 ${modelName} 推理錯誤:`, error);
 			throw error;
 		}
 	}
@@ -107,6 +141,12 @@ export class ChordClassifier {
 	/**
 	 * 層級決策樹分類
 	 * 實現與原始 Python system() 函數相同的邏輯
+	 *
+	 * 決策樹結構：
+	 * Model1 (Barre=0 vs Open=1)
+	 * ├─ Barre (0) → Model2 (E/Am/A shape)
+	 * └─ Open (1) → Model3 (C/F=0, E/Am=1, Other=2)
+	 *               └─ Other (2) → Model4 (Em/G/A/D)
 	 */
 	async classify(preprocessedLandmarks: number[]): Promise<ClassificationResult> {
 		if (!this.isInitialized) {
@@ -117,7 +157,7 @@ export class ChordClassifier {
 
 		// Model 1: Barre vs Open
 		const result1 = await this.runModel('model1', preprocessedLandmarks);
-		modelPath.push('model1');
+		modelPath.push(`model1:${result1.label}(${(result1.confidence * 100).toFixed(1)}%)`);
 
 		// 置信度檢查
 		if (result1.confidence < this.confidenceThreshold) {
@@ -131,34 +171,31 @@ export class ChordClassifier {
 		if (result1.classId === 0) {
 			// Barre chord → Model 2
 			const result2 = await this.runModel('model2', preprocessedLandmarks);
-			modelPath.push('model2');
+			modelPath.push(`model2:${result2.label}(${(result2.confidence * 100).toFixed(1)}%)`);
 
-			const chordName = CHORD_LABELS.model2[result2.classId] || '未知';
 			return {
-				chordName: FINAL_CHORD_NAMES[chordName] || chordName,
+				chordName: FINAL_CHORD_NAMES[result2.label] || result2.label,
 				confidence: result2.confidence,
 				modelPath
 			};
 		} else {
 			// Open chord → Model 3
 			const result3 = await this.runModel('model3', preprocessedLandmarks);
-			modelPath.push('model3');
+			modelPath.push(`model3:${result3.label}(${(result3.confidence * 100).toFixed(1)}%)`);
 
 			if (result3.classId === 2) {
 				// Other → Model 4
 				const result4 = await this.runModel('model4', preprocessedLandmarks);
-				modelPath.push('model4');
+				modelPath.push(`model4:${result4.label}(${(result4.confidence * 100).toFixed(1)}%)`);
 
-				const chordName = CHORD_LABELS.model4[result4.classId] || '未知';
 				return {
-					chordName: FINAL_CHORD_NAMES[chordName] || chordName,
+					chordName: FINAL_CHORD_NAMES[result4.label] || result4.label,
 					confidence: result4.confidence,
 					modelPath
 				};
 			} else {
-				const chordName = CHORD_LABELS.model3[result3.classId] || '未知';
 				return {
-					chordName: FINAL_CHORD_NAMES[chordName] || chordName,
+					chordName: FINAL_CHORD_NAMES[result3.label] || result3.label,
 					confidence: result3.confidence,
 					modelPath
 				};
