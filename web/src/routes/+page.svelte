@@ -36,6 +36,18 @@
 		<p class="text-gray-400">
 			AI 驅動 · 視覺 + 音頻雙重識別 · 即時反饋
 		</p>
+		<!-- 模式切換 -->
+		<div class="flex justify-center gap-4 mt-4">
+			<span class="px-4 py-2 bg-blue-600 rounded-full text-sm font-medium">
+				📷 即時模式
+			</span>
+			<a
+				href="/analyze"
+				class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-full text-sm font-medium transition-colors"
+			>
+				🎬 影片分析
+			</a>
+		</div>
 	</header>
 
 	{#if isClient}
