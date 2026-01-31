@@ -141,18 +141,14 @@
 				return;
 			}
 
-			// Chrome/Edge: 請求螢幕分享（捕獲當前標籤頁 + 音頻）
+			// Chrome/Edge: 請求螢幕分享（讓用戶選擇 YouTube 視窗）
 			screenStream = await navigator.mediaDevices.getDisplayMedia({
-				video: {
-					displaySurface: 'browser'
-				},
+				video: true,
 				audio: {
 					echoCancellation: false,
 					noiseSuppression: false,
 					autoGainControl: false
-				},
-				// @ts-ignore - preferCurrentTab is a newer API
-				preferCurrentTab: true
+				}
 			});
 
 			// 檢查音頻軌道
@@ -634,42 +630,45 @@
 			{/if}
 
 		{:else if mode === 'youtube'}
-			<!-- YouTube 影片預覽 -->
+			<!-- YouTube 影片 - 在新視窗打開 -->
 			<div class="chord-card">
-				<div class="aspect-video mb-4 rounded-lg overflow-hidden bg-black">
-					<iframe
-						src="https://www.youtube.com/embed/{youtubeId}?enablejsapi=1"
-						title="YouTube video"
-						class="w-full h-full"
-						allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-						allowfullscreen
-					></iframe>
+				<!-- 縮圖預覽 -->
+				<div class="aspect-video mb-4 rounded-lg overflow-hidden bg-black relative">
+					<img
+						src="https://img.youtube.com/vi/{youtubeId}/maxresdefault.jpg"
+						alt="YouTube 縮圖"
+						class="w-full h-full object-cover"
+						onerror={(e) => {
+							(e.target as HTMLImageElement).src = `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`;
+						}}
+					/>
+					<a
+						href="https://www.youtube.com/watch?v={youtubeId}"
+						target="_blank"
+						rel="noopener noreferrer"
+						class="absolute inset-0 flex items-center justify-center bg-black/50 hover:bg-black/30 transition-colors"
+					>
+						<div class="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center">
+							<span class="text-4xl ml-1">▶</span>
+						</div>
+					</a>
 				</div>
 
 				<div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
 					<h3 class="font-medium text-blue-400 mb-2">📋 分析步驟</h3>
-					{#if isSafari}
-						<!-- Safari 說明 -->
-						<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
-							<li>點擊下方「開始分析」按鈕</li>
-							<li>允許螢幕分享（選擇此視窗）</li>
-							<li>允許麥克風權限（用於收錄音頻）</li>
-							<li><strong class="text-yellow-400">開啟電腦喇叭</strong>，讓麥克風收錄 YouTube 音頻</li>
-							<li>播放上方 YouTube 影片</li>
-						</ol>
-						<p class="mt-2 text-xs text-gray-500">
-							* Safari 不支援直接捕獲系統音頻，需透過麥克風收音
-						</p>
-					{:else}
-						<!-- Chrome/Edge 說明 -->
-						<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
-							<li>點擊下方「開始分析」按鈕</li>
-							<li>在彈出視窗中選擇「Chrome 標籤頁」</li>
-							<li>選擇此標籤頁，並<strong class="text-yellow-400">勾選「分享標籤頁音訊」</strong></li>
-							<li>回到此頁面，播放上方 YouTube 影片</li>
-							<li>系統會同時分析畫面和音頻中的和弦</li>
-						</ol>
-					{/if}
+					<ol class="text-gray-300 text-sm space-y-2 list-decimal list-inside">
+						<li>
+							<strong class="text-yellow-400">先點擊上方縮圖</strong>，在新視窗打開 YouTube
+						</li>
+						<li>回到此頁面，點擊下方「開始分析」</li>
+						<li>在彈出視窗中選擇 <strong class="text-yellow-400">YouTube 所在的視窗</strong></li>
+						{#if isSafari}
+							<li>允許麥克風權限，<strong class="text-yellow-400">開啟喇叭</strong>讓麥克風收錄音頻</li>
+						{:else}
+							<li>勾選「分享音訊」選項</li>
+						{/if}
+						<li>在 YouTube 視窗播放影片，系統即時分析</li>
+					</ol>
 				</div>
 
 				{#if errorMessage}
@@ -777,9 +776,9 @@
 					{#if inputSource === 'youtube'}
 						<p class="mt-4 text-center text-yellow-400 text-sm">
 							{#if useMicForAudio}
-								🔊 請開啟喇叭播放 YouTube，讓麥克風收錄音頻
+								🔊 請在 YouTube 視窗播放影片，開啟喇叭讓麥克風收錄
 							{:else}
-								⬆️ 請在 YouTube 影片中點擊播放
+								▶️ 請在 YouTube 視窗播放影片
 							{/if}
 						</p>
 					{/if}
