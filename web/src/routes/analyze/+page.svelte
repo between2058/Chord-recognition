@@ -63,6 +63,8 @@
 
 	// 功能支援
 	let supportsScreenCapture = false;
+	let isSafari = false;
+	let useMicForAudio = false; // Safari 需要用麥克風收音
 
 	// ML 模組
 	const handTracker = getHandTracker();
@@ -71,6 +73,8 @@
 
 	onMount(() => {
 		supportsScreenCapture = isSystemAudioSupported();
+		// 檢測 Safari
+		isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
 		return () => {
 			cleanup();
@@ -131,7 +135,13 @@
 		errorMessage = '';
 
 		try {
-			// 請求螢幕分享（捕獲當前標籤頁）
+			// Safari 不支援螢幕分享音頻，需要用麥克風
+			if (isSafari) {
+				await startYouTubeAnalysisSafari();
+				return;
+			}
+
+			// Chrome/Edge: 請求螢幕分享（捕獲當前標籤頁 + 音頻）
 			screenStream = await navigator.mediaDevices.getDisplayMedia({
 				video: {
 					displaySurface: 'browser'
@@ -184,6 +194,59 @@
 			await startAnalysis();
 		} catch (error) {
 			console.error('螢幕捕獲錯誤:', error);
+			errorMessage = (error as Error).message;
+		}
+	}
+
+	// Safari 專用：螢幕捕獲畫面 + 麥克風收音
+	async function startYouTubeAnalysisSafari() {
+		try {
+			// 1. 請求螢幕分享（只有畫面）
+			screenStream = await navigator.mediaDevices.getDisplayMedia({
+				video: true,
+				audio: false // Safari 不支援
+			});
+
+			// 設置捕獲的影片元素
+			if (capturedVideoElement) {
+				capturedVideoElement.srcObject = screenStream;
+				await capturedVideoElement.play();
+			}
+
+			// 2. 請求麥克風權限來收錄電腦播放的聲音
+			const micStream = await navigator.mediaDevices.getUserMedia({
+				audio: {
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false
+				}
+			});
+
+			// 設置音頻分析
+			const audioContext = new AudioContext({ sampleRate: 44100 });
+			const source = audioContext.createMediaStreamSource(micStream);
+			const analyser = audioContext.createAnalyser();
+			analyser.fftSize = 4096;
+			source.connect(analyser);
+
+			audioCapture = {
+				stream: micStream,
+				audioContext,
+				analyser,
+				source
+			};
+
+			useMicForAudio = true;
+
+			// 監聽螢幕分享結束
+			screenStream.getVideoTracks()[0].onended = () => {
+				stopAnalysis();
+			};
+
+			// 開始分析
+			await startAnalysis();
+		} catch (error) {
+			console.error('Safari 分析錯誤:', error);
 			errorMessage = (error as Error).message;
 		}
 	}
@@ -585,13 +648,28 @@
 
 				<div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
 					<h3 class="font-medium text-blue-400 mb-2">📋 分析步驟</h3>
-					<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
-						<li>點擊下方「開始分析」按鈕</li>
-						<li>在彈出視窗中選擇「Chrome 標籤頁」</li>
-						<li>選擇此標籤頁，並<strong class="text-yellow-400">勾選「分享標籤頁音訊」</strong></li>
-						<li>回到此頁面，播放上方 YouTube 影片</li>
-						<li>系統會同時分析畫面和音頻中的和弦</li>
-					</ol>
+					{#if isSafari}
+						<!-- Safari 說明 -->
+						<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
+							<li>點擊下方「開始分析」按鈕</li>
+							<li>允許螢幕分享（選擇此視窗）</li>
+							<li>允許麥克風權限（用於收錄音頻）</li>
+							<li><strong class="text-yellow-400">開啟電腦喇叭</strong>，讓麥克風收錄 YouTube 音頻</li>
+							<li>播放上方 YouTube 影片</li>
+						</ol>
+						<p class="mt-2 text-xs text-gray-500">
+							* Safari 不支援直接捕獲系統音頻，需透過麥克風收音
+						</p>
+					{:else}
+						<!-- Chrome/Edge 說明 -->
+						<ol class="text-gray-300 text-sm space-y-1 list-decimal list-inside">
+							<li>點擊下方「開始分析」按鈕</li>
+							<li>在彈出視窗中選擇「Chrome 標籤頁」</li>
+							<li>選擇此標籤頁，並<strong class="text-yellow-400">勾選「分享標籤頁音訊」</strong></li>
+							<li>回到此頁面，播放上方 YouTube 影片</li>
+							<li>系統會同時分析畫面和音頻中的和弦</li>
+						</ol>
+					{/if}
 				</div>
 
 				{#if errorMessage}
@@ -698,7 +776,11 @@
 
 					{#if inputSource === 'youtube'}
 						<p class="mt-4 text-center text-yellow-400 text-sm">
-							⬆️ 請在上方 YouTube 影片中點擊播放
+							{#if useMicForAudio}
+								🔊 請開啟喇叭播放 YouTube，讓麥克風收錄音頻
+							{:else}
+								⬆️ 請在 YouTube 影片中點擊播放
+							{/if}
 						</p>
 					{/if}
 				</div>
