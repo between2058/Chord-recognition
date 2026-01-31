@@ -14,8 +14,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
+# Allow web/src/lib
+!web/src/lib/
 parts/
 sdist/
 var/
