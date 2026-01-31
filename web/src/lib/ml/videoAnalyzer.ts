@@ -1,9 +1,14 @@
 /**
  * 影片/音頻和弦分析器
  * 分析音頻中的和弦並生成時間軸
+ *
+ * 支援兩種模式:
+ * 1. BTC API (推薦) - 使用 BTC Transformer 模型，準確度 ~82%，支援 170 種和弦
+ * 2. 本地 Chromagram - 瀏覽器端分析，準確度較低，支援 12 種和弦
  */
 
 import { getAudioAnalyzer, type ChordDetectionResult } from './audioAnalyzer';
+import { getBTCApiClient, formatChordName, type BTCChordSegment } from './btcApi';
 
 export interface ChordSegment {
 	chord: string;
@@ -16,6 +21,8 @@ export interface AnalysisResult {
 	segments: ChordSegment[];
 	duration: number;
 	bpm?: number;
+	method?: 'btc' | 'chromagram'; // 使用的分析方法
+	vocabularySize?: number; // 支援的和弦數量
 }
 
 export interface AnalysisProgress {
@@ -25,6 +32,12 @@ export interface AnalysisProgress {
 	currentChord: string;
 }
 
+export interface AnalyzerOptions {
+	useBTC?: boolean; // 是否使用 BTC API (預設: true)
+	btcApiUrl?: string; // BTC API URL (預設: http://localhost:8000)
+	minDuration?: number; // 最小和弦持續時間 (預設: 0.3)
+}
+
 type ProgressCallback = (progress: AnalysisProgress) => void;
 
 export class VideoChordAnalyzer {
@@ -32,6 +45,8 @@ export class VideoChordAnalyzer {
 	private analyser: AnalyserNode | null = null;
 	private isAnalyzing = false;
 	private segments: ChordSegment[] = [];
+	private options: AnalyzerOptions;
+	private btcAvailable: boolean | null = null;
 
 	// Chromagram 模板（與 audioAnalyzer.ts 相同）
 	private readonly CHORD_TEMPLATES: Record<string, number[]> = {
@@ -49,6 +64,35 @@ export class VideoChordAnalyzer {
 		D7: [0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0]
 	};
 
+	constructor(options: AnalyzerOptions = {}) {
+		this.options = {
+			useBTC: true,
+			btcApiUrl: 'http://localhost:8000',
+			minDuration: 0.3,
+			...options
+		};
+	}
+
+	/**
+	 * 檢查 BTC API 是否可用
+	 */
+	async checkBTCAvailability(): Promise<boolean> {
+		if (this.btcAvailable !== null) {
+			return this.btcAvailable;
+		}
+
+		try {
+			const client = getBTCApiClient(this.options.btcApiUrl);
+			this.btcAvailable = await client.isAvailable();
+			console.log(`BTC API ${this.btcAvailable ? '可用' : '不可用'}`);
+		} catch {
+			this.btcAvailable = false;
+			console.log('BTC API 不可用，將使用本地 Chromagram 分析');
+		}
+
+		return this.btcAvailable;
+	}
+
 	/**
 	 * 分析本地音頻/視頻文件
 	 */
@@ -57,6 +101,15 @@ export class VideoChordAnalyzer {
 		onProgress?: ProgressCallback
 	): Promise<AnalysisResult> {
 		console.log('🎵 開始分析文件:', file.name);
+
+		// 檢查是否使用 BTC API
+		if (this.options.useBTC) {
+			const btcAvailable = await this.checkBTCAvailability();
+			if (btcAvailable) {
+				return this.analyzeFileWithBTC(file, onProgress);
+			}
+			console.log('BTC API 不可用，回退到本地分析');
+		}
 
 		// 創建音頻上下文
 		this.audioContext = new AudioContext();
@@ -74,6 +127,73 @@ export class VideoChordAnalyzer {
 	}
 
 	/**
+	 * 使用 BTC API 分析文件
+	 */
+	private async analyzeFileWithBTC(
+		file: File,
+		onProgress?: ProgressCallback
+	): Promise<AnalysisResult> {
+		console.log('🚀 使用 BTC Transformer 分析 (170 種和弦)');
+
+		const client = getBTCApiClient(this.options.btcApiUrl);
+
+		// 報告進度
+		if (onProgress) {
+			onProgress({
+				currentTime: 0,
+				duration: 0,
+				percentage: 10,
+				currentChord: '分析中...'
+			});
+		}
+
+		try {
+			const response = await client.analyzeFile(
+				file,
+				this.options.minDuration,
+				(progress) => {
+					if (onProgress) {
+						onProgress({
+							currentTime: 0,
+							duration: 0,
+							percentage: progress,
+							currentChord: '分析中...'
+						});
+					}
+				}
+			);
+
+			// 轉換 BTC 響應格式
+			const segments: ChordSegment[] = response.chords.map((chord) => ({
+				chord: formatChordName(chord.chord),
+				startTime: chord.start,
+				endTime: chord.end,
+				confidence: 0.85 // BTC 模型的平均置信度
+			}));
+
+			// 完成
+			if (onProgress) {
+				onProgress({
+					currentTime: response.duration,
+					duration: response.duration,
+					percentage: 100,
+					currentChord: segments.length > 0 ? segments[segments.length - 1].chord : ''
+				});
+			}
+
+			return {
+				segments,
+				duration: response.duration,
+				method: 'btc',
+				vocabularySize: response.vocabulary_size
+			};
+		} catch (error) {
+			console.error('BTC 分析失敗:', error);
+			throw error;
+		}
+	}
+
+	/**
 	 * 從 ArrayBuffer 分析音頻（用於 YouTube 音頻）
 	 */
 	async analyzeArrayBuffer(
@@ -81,6 +201,16 @@ export class VideoChordAnalyzer {
 		onProgress?: ProgressCallback
 	): Promise<AnalysisResult> {
 		console.log('🎵 開始分析 ArrayBuffer...');
+
+		// 如果 BTC 可用，將 ArrayBuffer 轉換為 File 並使用 BTC
+		if (this.options.useBTC) {
+			const btcAvailable = await this.checkBTCAvailability();
+			if (btcAvailable) {
+				const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+				const file = new File([blob], 'audio.wav', { type: 'audio/wav' });
+				return this.analyzeFileWithBTC(file, onProgress);
+			}
+		}
 
 		// 創建音頻上下文
 		if (!this.audioContext) {
@@ -179,7 +309,9 @@ export class VideoChordAnalyzer {
 
 		return {
 			segments: mergedSegments,
-			duration
+			duration,
+			method: 'chromagram',
+			vocabularySize: Object.keys(this.CHORD_TEMPLATES).length
 		};
 	}
 
@@ -348,11 +480,18 @@ export class VideoChordAnalyzer {
 // 單例
 let analyzerInstance: VideoChordAnalyzer | null = null;
 
-export function getVideoChordAnalyzer(): VideoChordAnalyzer {
+export function getVideoChordAnalyzer(options?: AnalyzerOptions): VideoChordAnalyzer {
 	if (!analyzerInstance) {
-		analyzerInstance = new VideoChordAnalyzer();
+		analyzerInstance = new VideoChordAnalyzer(options);
 	}
 	return analyzerInstance;
+}
+
+/**
+ * 創建新的分析器實例 (非單例)
+ */
+export function createVideoChordAnalyzer(options?: AnalyzerOptions): VideoChordAnalyzer {
+	return new VideoChordAnalyzer(options);
 }
 
 /**

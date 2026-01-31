@@ -1,0 +1,22 @@
+# BTC Chord Recognition API Dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# PyTorch - install separately based on your system
+# For Mac: pip install torch torchvision torchaudio
+# For Linux/Windows with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0
+
+# Audio processing
+librosa>=0.10.0
+numpy>=1.24.0
+soundfile>=0.12.0
+
+# Chord evaluation
+mir_eval>=0.7
+pretty_midi>=0.2.10
+
+# Utilities
+pyyaml>=6.0
+pandas>=2.0.0
